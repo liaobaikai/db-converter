@@ -1,10 +1,6 @@
 package com.liaobaikai.bbq;
 
-import com.liaobaikai.bbq.db.Database;
-import net.sourceforge.argparse4j.ArgumentParsers;
-import net.sourceforge.argparse4j.inf.ArgumentParser;
-import net.sourceforge.argparse4j.inf.ArgumentParserException;
-import net.sourceforge.argparse4j.inf.Namespace;
+import com.liaobaikai.bbq.db.DataBase;
 
 import java.sql.SQLException;
 
@@ -39,14 +35,14 @@ public class Master {
 //            System.exit(1);
 //        }
 
-        Database d1 = new Database("a.baikai.top", "14330", "sa", "baikai#1234", "db_web382788");
-        Database d2 = new Database("127.0.0.1", "3306", "baikai", "baikai#1234", "db_web382788");
+        DataBase d1 = new DataBase("a.baikai.top", "14330", "sa", "baikai#1234", "db_web382788");
+        DataBase d2 = new DataBase("127.0.0.1", "3306", "baikai", "baikai#1234", "db_web382788");
         d2.setCharset("utf8mb4");
         d2.setEngine("innodb");
 
         SQLServer2MySQLConverter converter = new SQLServer2MySQLConverter(d1, d2);
         try {
-            converter.convertMetadata(null, null, false, "replace");
+            converter.convertMetadata(new String[]{"bb", "cc"}, null, true, "replace");
         } catch (SQLException e) {
             e.printStackTrace();
         }

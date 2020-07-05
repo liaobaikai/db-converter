@@ -1,30 +1,22 @@
 package com.liaobaikai.bbq;
 
-import com.alibaba.druid.pool.DruidDataSource;
-import com.liaobaikai.bbq.db.Database;
+import com.liaobaikai.bbq.db.DataBase;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
 import java.sql.*;
-import java.text.SimpleDateFormat;
-import java.util.*;
 import java.util.Date;
+import java.util.*;
 
-public class SQLServer2MySQLConverter implements DatabaseConverter {
+public class SQLServer2MySQLConverter extends AbstractDatabaseConverter {
 
-    private DruidDataSource sDataSource;
-    private DruidDataSource tDataSource;
-    private JdbcTemplate sJdbcTemplate;
-    private JdbcTemplate tJdbcTemplate;
-
-    private Connection sConnection;
-    private Connection tConnection;
-
-    private Database sDatabase;
-    private Database tDatabase;
     private Logger logger = LoggerFactory.getLogger(SQLServer2MySQLConverter.class);
+
+    private static final String CREATE_TABLE_TEMPLATE = "CREATE TABLE IF NOT EXISTS `%s`\n(\n%s\n) ENGINE=%s DEFAULT CHARSET=%s";
+    private static final String DROP_TABLE_TEMPLATE = "DROP TABLE IF EXISTS `%s`";
+    private static final String INSERT_TEMPLATE = "insert into `%s` ( %s ) values ( %s )";
 
     private static final Map<String, String> MSSQL2MYSQL = new HashMap<String, String>();
     static {
@@ -66,28 +58,8 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         IGNORE_LENGTH_DATA_TYPES.add("smallint");
     }
 
-    public SQLServer2MySQLConverter(Database source, Database target) {
-        sDataSource = new DruidDataSource();
-        sDataSource.setDriverClassName(this.getSourceDriverClassName());
-        sDataSource.setUrl(String.format(this.getSourceUrl(), source.getHostname(), source.getPort(), source.getDbName()));
-        sDataSource.setUsername(source.getUsername());
-        sDataSource.setPassword(source.getPassword());
-
-        this.sDatabase = source;
-        this.tDatabase = target;
-
-        tDataSource = new DruidDataSource();
-        tDataSource.setDriverClassName(this.getTargetDriverClassName());
-        tDataSource.setUrl(String.format(this.getTargetUrl(), target.getHostname(), target.getPort(), target.getDbName(), target.getEncoding()));
-        tDataSource.setUsername(target.getUsername());
-        tDataSource.setPassword(target.getPassword());
-
-        sJdbcTemplate = new JdbcTemplate();
-        sJdbcTemplate.setDataSource(sDataSource);
-
-        tJdbcTemplate = new JdbcTemplate();
-        tJdbcTemplate.setDataSource(tDataSource);
-
+    public SQLServer2MySQLConverter(DataBase source, DataBase target) {
+        super(source, target);
     }
 
     @Override
@@ -120,17 +92,6 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         return "jdbc:mysql://%s:%s/%s?useUnicode=true&characterEncoding=%s&rewriteBatchedStatements=true&zeroDateTimeBehavior=convertToNull&allowMultiQueries=true&useSSL=true&serverTimezone=GMT%%2B8";
     }
 
-    @Override
-    public List<String> getAllTableNames() throws SQLException {
-        List<String> allTableNames = new ArrayList<String>();
-        // 获取所有的表
-        ResultSet tableResultSet = sConnection.getMetaData()
-                .getTables(sConnection.getCatalog(),null, null, new String[]{"TABLE"});
-        while (tableResultSet.next()){
-            allTableNames.add(tableResultSet.getString("TABLE_NAME"));
-        }
-        return allTableNames;
-    }
 
     @Override
     public List<String> convertMetadata(String[] tables, String[] ignoreTables, boolean includeIndex, String exists) throws SQLException {
@@ -165,7 +126,7 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         int digits, dataType;
         long columnSize;
 
-        final String tableTemplate = "CREATE TABLE IF NOT EXISTS `%s`\n(\n%s\n) ENGINE=%s DEFAULT CHARSET=%s";
+
 
         // 成功创建的表
         List<String> successTables = new ArrayList<String>();
@@ -178,16 +139,9 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         // 所有表
         for(String tableName : tableNames){
 
-            if(ignoreTables != null && ignoreTables.length > 0){
-                // 判断需要忽略的表
-                boolean isIgnore = false;
-                for (String ignoreTable : ignoreTables) {
-                    if (tableName.equalsIgnoreCase(ignoreTable)) {
-                        isIgnore = true;
-                        break;
-                    }
-                }
-                if(isIgnore) continue;
+            // 判断当前表是否被忽略
+            if (isIgnoreTable(ignoreTables, tableName)) {
+                continue;
             }
 
             if(!allTableNames.contains(tableName)){
@@ -448,11 +402,13 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
 
             // 主键
             ResultSet primaryKeyResultSet = sDBMetaData.getPrimaryKeys(sCatalog, null, tableName);
+            List<String> primaryKeyList = new ArrayList<String>();
             while(primaryKeyResultSet.next()){
                 String primaryKeyColumnName = primaryKeyResultSet.getString("COLUMN_NAME");
                 if(primaryKeys.indexOf(primaryKeyColumnName) == -1){
                     primaryKeys.append(primaryKeyColumnName).append(",");
                 }
+                primaryKeyList.add(primaryKeyColumnName);
             }
             if(primaryKeys.length() > 0){
                 primaryKeys.delete(primaryKeys.length() - 1, primaryKeys.length());
@@ -464,13 +420,118 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
 
             // 获取该表的所有索引
             if(includeIndex){
+                Map<String, String> indexes = new HashMap<String, String>();
+                Map<String, String> uniqueIndexes = new HashMap<String, String>();
                 ResultSet indexResultSet = sDBMetaData.getIndexInfo(sCatalog, null, tableName, false, false);
+                while(indexResultSet.next()){
+                    // TABLE_CAT
+                    // TABLE_SCHEM
+                    // TABLE_NAME
+                    // NON_UNIQUE
+                    // INDEX_QUALIFIER 当前表
+                    // INDEX_NAME 索引名称
+                    // TYPE 索引类型：0统计信息，1聚集索引，2哈希索引，3其他索引
+                    // ORDINAL_POSITION
+                    // ASC_OR_DESC
+                    // CARDINALITY
+                    // PAGES
+                    // FILTER_CONDITION
+                    String indexColumnName = indexResultSet.getString("COLUMN_NAME");
+//                    if(indexColumnName == null) continue;
+                    // SQLServer默认在主键上创建一个聚集索引。
+                    short type = indexResultSet.getShort("TYPE");
+                    // 统计信息不处理。
+                    if(type == 0) continue;
+
+                    // 如果这个列是主键的话，不处理。
+                    if(primaryKeyList.contains(indexColumnName)){
+                        continue;
+                    }
+
+                    final String indexName = indexResultSet.getString("INDEX_NAME");
+                    final String ascOrDesc = indexResultSet.getString("ASC_OR_DESC");
+                    final int nonUnique = indexResultSet.getInt("NON_UNIQUE");
+                    switch (type){
+//                        case 0:
+//                            // tableIndexStatistic
+//                            // 统计信息
+//                            // CARDINALITY为行数
+//                            break;
+                        case 1:
+                            // tableIndexClustered
+                            // 聚集索引
+                            break;
+                        case 2:
+                            // tableIndexHashed
+                            // 哈希索引
+                            break;
+                        case 3:
+                            // tableIndexOther
+                            // 普通索引
+                            break;
+                    }
+
+                    String columns = null;
+                    if(nonUnique == 0){
+                        // 唯一
+                        columns = uniqueIndexes.get(indexName);
+                    } else if(nonUnique == 1){
+                        // 不唯一
+                        columns = indexes.get(indexName);
+                    }
+
+                    if(columns == null){
+                        columns = indexColumnName;
+                    } else {
+                        columns += "," + indexColumnName;
+                    }
+                    columns += " " + ("A".equals(ascOrDesc) ? "ASC" : "DESC");
+
+                    if(nonUnique == 0){
+                        uniqueIndexes.put(indexName, columns);
+                    } else if(nonUnique == 1){
+                        indexes.put(indexName, columns);
+                    }
+
+//                    System.out.println("sDBMetaData.getMaxRowSize():" + sDBMetaData.getMaxRowSize());
+//                    System.out.println("COLUMN_NAME: " + indexResultSet.getString("COLUMN_NAME"));
+//                    System.out.println("NON_UNIQUE: " + indexResultSet.getString("NON_UNIQUE"));
+//                    System.out.println("INDEX_QUALIFIER: " + indexResultSet.getString("INDEX_QUALIFIER"));
+//                    System.out.println("INDEX_NAME: " + indexResultSet.getString("INDEX_NAME"));
+//                    System.out.println("TYPE: " + type);
+//                    System.out.println("ORDINAL_POSITION: " + indexResultSet.getString("ORDINAL_POSITION"));
+//                    System.out.println("ASC_OR_DESC: " + indexResultSet.getString("ASC_OR_DESC"));
+//                    System.out.println("CARDINALITY: " + indexResultSet.getString("CARDINALITY"));
+//                    System.out.println("PAGES: " + indexResultSet.getString("PAGES"));
+//                    System.out.println("FILTER_CONDITION: " + indexResultSet.getString("FILTER_CONDITION"));
+                }
+
+                if(indexes.size() > 0 || uniqueIndexes.size() > 0){
+                    sqlBuilder.append(", \n");
+                }
+
+                if(indexes.size() > 0){
+                    for(Map.Entry<String, String> en: indexes.entrySet()){
+                        sqlBuilder.append("  index ").append(en.getKey()).append("(").append(en.getValue()).append("), ");
+                    }
+                    sqlBuilder.delete(sqlBuilder.length() - 2, sqlBuilder.length());
+                }
+
+
+                if(uniqueIndexes.size() > 0){
+                    for(Map.Entry<String, String> en: uniqueIndexes.entrySet()){
+                        sqlBuilder.append(" unique index ").append(en.getKey()).append("(").append(en.getValue()).append("), ");
+                    }
+                    sqlBuilder.delete(sqlBuilder.length() - 2, sqlBuilder.length());
+                }
+
+
             }
 
             try{
                 // 如果需要的话，删除表
                 if("replace".equals(exists)){
-                    final String sql = "DROP TABLE IF EXISTS " + tableName;
+                    final String sql = String.format(DROP_TABLE_TEMPLATE, tableName);
                     logger.info("即将执行删除表语句: \n{}; ", sql);
                     tJdbcTemplate.execute(sql);
                     logger.info("表[{}]已删除。", tableName);
@@ -482,8 +543,8 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
             }
 
             try{
-                final String sql = String.format(tableTemplate, tableName, sqlBuilder.toString(),
-                        this.tDatabase.getEngine(), this.tDatabase.getCharset());
+                final String sql = String.format(CREATE_TABLE_TEMPLATE, tableName, sqlBuilder.toString(),
+                        this.tDataBase.getEngine(), this.tDataBase.getCharset());
                 createTableDDL.put(tableName, sql);
                 logger.info("即将执行创建表语句: \n{}; ", sql);
                 tJdbcTemplate.execute(sql);
@@ -504,6 +565,7 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         if(failTables.size() > 0){
             logger.error("转换失败的表：");
             logger.error(failTables.toString());
+            logger.info("{}", createTableDDL.toString());
         }
 
         return successTables;
@@ -520,7 +582,6 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         Date startTime = new Date();
         final String sCatalog = sConnection.getCatalog();
         final String tCatalog = this.tDataSource.getConnection().getCatalog();
-        final DatabaseMetaData sDBMetaData = sConnection.getMetaData();
         // 数据库所有表
         List<String> allTableNames = this.getAllTableNames();
         // 当前需要操作的表
@@ -539,6 +600,7 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         }
 
         // 转换计数
+        // tableName, count
         HashMap<String, Long> convertCounter = new HashMap<String, Long>();
 
         // 非空的表
@@ -554,16 +616,9 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         // 所有表
         for(String tableName : tableNames) {
 
-            if (ignoreTables != null && ignoreTables.length > 0) {
-                // 判断需要忽略的表
-                boolean isIgnore = false;
-                for (String ignoreTable : ignoreTables) {
-                    if (tableName.equalsIgnoreCase(ignoreTable)) {
-                        isIgnore = true;
-                        break;
-                    }
-                }
-                if (isIgnore) continue;
+            // 判断当前表是否被忽略
+            if (isIgnoreTable(ignoreTables, tableName)) {
+                continue;
             }
 
             if (!allTableNames.contains(tableName)) {
@@ -592,7 +647,7 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
 
             // 每一行的数据
             final List<String> columnNames = new ArrayList<String>();
-            List<Object[]> rows = this.sJdbcTemplate.query("select * from " + tableName, new RowMapper<Object[]>() {
+            List<Object[]> rows = this.sJdbcTemplate.query(String.format("select * from %s", tableName), new RowMapper<Object[]>() {
                 @Override
                 public Object[] mapRow(ResultSet resultSet, int rowNum) throws SQLException {
                     ResultSetMetaData metaData = resultSet.getMetaData();
@@ -614,7 +669,7 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
             });
 
             // 每一行的数据
-            final String sqlTemplate = String.format("insert into %s ( %s ) values ( %s )", tableName,
+            final String sqlTemplate = String.format(INSERT_TEMPLATE, tableName,
                     columnNames.toString().replace("[", "").replace("]", ""),
                     this.getSQLPlaceHolder(columnNames));
 
@@ -628,10 +683,7 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
                 continue;
             }
 
-            final long interval = new Date().getTime() - beginTime.getTime();
-            SimpleDateFormat formatter = new SimpleDateFormat("HH:mm:ss:SSS");
-            formatter.setTimeZone(TimeZone.getTimeZone("GMT+00:00"));
-            logger.info("已导入表[{}]数据, 耗时{}", tableName, formatter.format(interval));
+            logger.info("已导入表[{}]数据, 耗时{}", tableName, DateUtils.formatTime(beginTime, new Date()));
             logger.info("即将校验表[{}]数据...", tableName);
 
             // 再次查询数据库表
@@ -650,10 +702,14 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         }
 
         logger.info("总结：");
-        final long interval = new Date().getTime() - startTime.getTime();
-        SimpleDateFormat formatter = new SimpleDateFormat("HH:mm:ss:SSS");
-        formatter.setTimeZone(TimeZone.getTimeZone("GMT+00:00"));
-        logger.info("总耗时: {}", formatter.format(interval));
+        StringBuilder records = new StringBuilder();
+        for (Map.Entry<String, Long> en : convertCounter.entrySet()) {
+            records.append(en.getKey()).append(": ").append(en.getValue()).append("\n");
+        }
+        records.delete(records.length() - 1, records.length());
+        logger.info("导入记录数如下: \n{}", records.toString());
+
+        logger.info("总耗时: {}", DateUtils.formatTime(startTime, new Date()));
         if(nonEmptyTables.size() > 0){
             logger.info("非空表的表：{}", nonEmptyTables);
         }
@@ -670,8 +726,8 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
 
     /**
      * 获取占位符
-     * @param columns
-     * @return
+     * @param columns 所有列
+     * @return 字符串
      */
     private String getSQLPlaceHolder(List<String> columns){
         StringBuilder sb = new StringBuilder();
@@ -687,9 +743,9 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
 
     /**
      * 获取行数
-     * @param jdbcTemplate
-     * @param tableName
-     * @return
+     * @param jdbcTemplate JdbcTemplate
+     * @param tableName 表名
+     * @return 行数
      */
     private long getTableRowCount(JdbcTemplate jdbcTemplate, String tableName){
 
@@ -704,6 +760,26 @@ public class SQLServer2MySQLConverter implements DatabaseConverter {
         return rowCount.get(0);
     }
 
+    /**
+     * 判断该表是否被忽略
+     * @param ignoreTables 需要被忽略的表
+     * @param tableName 当前的表名
+     * @return 是否被忽略
+     */
+    private boolean isIgnoreTable(String[] ignoreTables, String tableName){
+        if (ignoreTables != null && ignoreTables.length > 0) {
+            // 判断需要忽略的表
+            boolean isIgnore = false;
+            for (String ignoreTable : ignoreTables) {
+                if (tableName.equalsIgnoreCase(ignoreTable)) {
+                    isIgnore = true;
+                    break;
+                }
+            }
+            return isIgnore;
+        }
+        return false;
+    }
 
 
 }

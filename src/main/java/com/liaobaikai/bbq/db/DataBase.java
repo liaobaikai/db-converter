@@ -1,6 +1,6 @@
 package com.liaobaikai.bbq.db;
 
-public class Database {
+public class DataBase {
 
     private String hostname;
     private String port;
@@ -14,7 +14,7 @@ public class Database {
     // 生成表的存储引擎，MySQL的innodb, MyISAM
     private String engine = "";
 
-    public Database(String hostname, String port, String username, String password, String dbName) {
+    public DataBase(String hostname, String port, String username, String password, String dbName) {
         this.hostname = hostname;
         this.port = port;
         this.username = username;
@@ -22,7 +22,7 @@ public class Database {
         this.dbName = dbName;
     }
 
-    public Database(String hostname, String port, String username, String password, String dbName, String encoding) {
+    public DataBase(String hostname, String port, String username, String password, String dbName, String encoding) {
         this.hostname = hostname;
         this.port = port;
         this.username = username;
